@@ -27,17 +27,30 @@ cdef extern from "mrf.h":
                               np.ndarray XYZ,
                               np.ndarray U,
                               int ngb_size)
+cdef extern from "pve.h":
+    void pve_import_array()
+    int __linsolve(double* A, double* b, int* tmp, int n)
+    void __locsum(double* res, double* degree, double* pvm,
+                  int x, int y, int z,
+                  int dimx, int dimy, int dimz, int dimk,
+                  int ngb_size)
+    int* __generate_bmaps(int n, int* nmaps)
+    void __quadsimplex(double* A, double* b, int n,
+                       double* x, int* bmaps, int nbmaps,
+                       int* I, double* AI, double* bI, double* cI,
+                       double* AI_cp, int* tmp)
+    void _quadsimplex(np.ndarray A, np.ndarray b)
 cdef extern from "stdlib.h":
     void* calloc(int nmemb, int size)
     void* free(void* ptr) 
 cdef extern from "math.h":
     double HUGE_VAL
-cdef extern from "math.h":
     void* memcpy(void* dest, void* src, int n)
     void* memset(void* s, int c, int n)
 
 # Initialize numpy
 mrf_import_array()
+pve_import_array()
 np.import_array()
 
 
@@ -256,3 +269,137 @@ def simplex_fitting(Y, M, Q0, C):
     free(q)
     free(qe)
     free(aux)
+
+
+def linsolve(A, b):
+    cdef int ok, n = np.PyArray_DIM(A, 0)
+    Ac = np.array(A, order='F')
+    bc = np.array(b, order='F')
+    tmp = <int*>calloc(n, sizeof(int))
+    ok = __linsolve(<double*>np.PyArray_DATA(Ac),
+                     <double*>np.PyArray_DATA(bc), 
+                     tmp, n)
+    free(tmp)
+    return bc
+
+
+def quadsimplex(A, b):
+    _quadsimplex(A, b)
+    return b
+
+
+def update_cmap(CM, DATA, XYZ, MU, double s2, alpha, double beta, int ngb_size):
+    """
+    update_cmap(cm, data, XYZ, mu, s2, beta, V, ngb_size)
+
+    where dimensions are:
+      cm: (dx,dy,dz,K)
+      data: (N,)
+      XYZ: (N,3)
+      mu: (K,)
+      s2: float
+      alpha: (K,K)
+      beta: float
+
+    Parameter cm is modified in place.
+    """
+    cdef np.flatiter itY, itQ
+    cdef double *data, *cm, *_cm, *q
+    cdef double *A, *b, *pb, *AI, *bI, *cI, *AI_cp
+    cdef int dimx, dimy, dimz, stx, sty
+    cdef int K, Kbytes, nbmaps, axis = 1
+    cdef int *bmaps, *I, *tmp
+    cdef np.npy_intp* xyz
+    cdef double degree, two_beta = 2*beta
+
+    # Test input compliance and reformat if needed
+    DATA = np.asarray(DATA, dtype='double', order='C')
+    if not CM.ndim == 4 or not CM.flags['C_CONTIGUOUS']\
+            or not CM.dtype=='double':
+        raise ValueError('cm should be 4D, double and C-contiguous')
+    if not XYZ.ndim == 2 or not XYZ.shape[1] == 3\
+            or not XYZ.flags['C_CONTIGUOUS'] or not XYZ.dtype=='intp':
+        raise ValueError('XYZ array should be intp C-contiguous')
+
+    # Compute dimensional parameters
+    dimx, dimy, dimz, K = CM.shape
+    sty = dimz*K
+    stx = dimy*sty
+    Kbytes = K*sizeof(double)
+
+    # Create auxiliary arrays
+    MU = np.reshape(np.asarray(MU), (K, 1))
+    PyA = (1/s2)*np.dot(MU, MU.T) + np.asarray(alpha) + 2*beta*ngb_size*np.eye(K)
+    Pyb = -MU/s2
+    A = <double*>np.PyArray_DATA(PyA)
+    pb = <double*>np.PyArray_DATA(Pyb)
+
+    # Generate mappings from [1,2,...,n] to {0,1} for the active set
+    # quadratic programming method
+    bmaps = __generate_bmaps(K, &nbmaps)
+
+    # Allocate auxiliary arrays
+    q = <double*>calloc(K, sizeof(double))
+    b = <double*>calloc(K*K, sizeof(double))
+    I = <int*>calloc(K, sizeof(int))
+    AI = <double*>calloc(K*K, sizeof(double))
+    bI = <double*>calloc(K, sizeof(double))
+    cI = <double*>calloc(K, sizeof(double))
+    AI_cp = <double*>calloc(K*K, sizeof(double))
+    tmp = <int*>calloc(K, sizeof(int))
+
+    # Loop over the image array
+    itXYZ = np.PyArray_IterAllButAxis(XYZ, &axis)
+    itDATA = DATA.flat
+    cm = <double*>np.PyArray_DATA(CM)
+    while np.PyArray_ITER_NOTDONE(itDATA):
+        
+        # Get voxel coordinates
+        xyz = <np.npy_intp*>(np.PyArray_ITER_DATA(itXYZ))
+        
+        # Compute local sum of concentration vectors --> q
+        if beta > 0:
+            __locsum(q, &degree, cm, xyz[0], xyz[1], xyz[2],
+                     dimx, dimy, dimz, K, ngb_size)
+
+        # Get image intensity
+        data = <double*>(np.PyArray_ITER_DATA(itDATA)) 
+
+        # Assemble vector b at current voxel
+        for i from 0 <= i < K:
+            b[i] = pb[i]*data[0] - two_beta*q[i]
+
+        # Solve quadratic simplex programming --> q
+        __quadsimplex(A, b, K, q, bmaps, nbmaps, I, AI, bI, cI, AI_cp, tmp)
+
+        # Copy result back into cm
+        _cm = cm + xyz[0]*stx + xyz[1]*sty + xyz[2]*K
+        memcpy(<void*>_cm, <void*>q, Kbytes)
+
+        # Update iterators
+        np.PyArray_ITER_NEXT(itDATA)
+        np.PyArray_ITER_NEXT(itXYZ)
+
+    # Free auxiliary arrays
+    free(q)
+    free(b)
+    free(I)
+    free(AI)
+    free(bI)
+    free(cI)
+    free(AI_cp)
+    free(tmp)
+    free(bmaps)
+
+
+def generate_bmaps(int n):
+    cdef int i, nmaps
+    cdef int* bmaps
+    cdef np.npy_intp* data
+    bmaps = __generate_bmaps(n, &nmaps)
+    ret = np.zeros((nmaps, n), dtype='intp')
+    data = <np.npy_intp*>np.PyArray_DATA(ret)
+    for i from 0 <= i < n*nmaps:
+        data[i] = bmaps[i]
+    free(bmaps)
+    return ret

@@ -1,32 +1,31 @@
 import numpy as np
 
-from .segmentation import (Segmentation,
-                           moment_matching,
-                           map_from_ppm)
+from .vem import (VEM, map_from_ppm)
+from .moment_matching import moment_matching
 
 T1_ref_params = {}
 T1_ref_params['glob_mu'] = 1643.2
-T1_ref_params['glob_sigma'] = 252772.3
+T1_ref_params['glob_s2'] = 252772.3
 T1_ref_params['3k'] = {
     'mu': np.array([813.9, 1628.3, 2155.8]),
-    'sigma': np.array([46499.0, 30233.4, 17130.0])}
+    's2': np.array([46499.0, 30233.4, 17130.0])}
 T1_ref_params['4k'] = {
     'mu': np.array([816.1, 1613.7, 1912.3, 2169.3]),
-    'sigma': np.array([47117.6, 27053.8, 8302.2, 14970.8])}
+    's2': np.array([47117.6, 27053.8, 8302.2, 14970.8])}
 T1_ref_params['5k'] = {
     'mu': np.array([724.2, 1169.3, 1631.5, 1917.0, 2169.2]),
-    'sigma': np.array([22554.8, 21368.9, 20560.1, 7302.6, 14962.1])}
+    's2': np.array([22554.8, 21368.9, 20560.1, 7302.6, 14962.1])}
 
 
 class BrainT1Segmentation(object):
 
-    def __init__(self, data, mask=None, model='3k',
+    def __init__(self, img, mask=None, model='3k',
                  niters=25, ngb_size=6, beta=0.5,
                  ref_params=None, init_params=None,
                  convert=True):
 
         self.labels = ('CSF', 'GM', 'WM')
-        self.data = data
+        self.img = img
         self.mask = mask
 
         mixmat = np.asarray(model)
@@ -61,12 +60,12 @@ class BrainT1Segmentation(object):
         if init_params == None:
             if ref_params == None:
                 ref_params = T1_ref_params
-            self.init_mu, self.init_sigma = self._init_parameters(ref_params)
+            self.init_mu, self.init_s2 = self._init_parameters(ref_params)
         else:
             self.init_mu = np.array(init_params[0], dtype='double')
-            self.init_sigma = np.array(init_params[1], dtype='double')
+            self.init_s2 = np.array(init_params[1], dtype='double')
             if not len(self.init_mu) == self.mixmat.shape[0]\
-                    or not len(self.init_sigma) == self.mixmat.shape[0]:
+                    or not len(self.init_s2) == self.mixmat.shape[0]:
                 raise ValueError('Inconsistent initial parameter estimates')
 
         self._run()
@@ -78,34 +77,34 @@ class BrainT1Segmentation(object):
     def _init_parameters(self, ref_params):
 
         if not self.mask == None:
-            data = self.data[self.mask]
+            data = self.img.get_data()[self.mask]
         else:
-            data = self.data
+            data = self.img.get_data()
 
         nclasses = self.mixmat.shape[0]
         if nclasses <= 5:
             key = str(self.mixmat.shape[0]) + 'k'
             ref_mu = ref_params[key]['mu']
-            ref_sigma = ref_params[key]['sigma']
+            ref_s2 = ref_params[key]['s2']
         else:
             ref_mu = np.linspace(ref_params['3k']['mu'][0],
                                  ref_params['3k']['mu'][-1],
                                  num=nclasses)
-            ref_sigma = np.linspace(ref_params['3k']['sigma'][0],
-                                    ref_params['3k']['sigma'][-1],
+            ref_s2 = np.linspace(ref_params['3k']['s2'][0],
+                                    ref_params['3k']['s2'][-1],
                                     num=nclasses)
 
-        return moment_matching(data, ref_mu, ref_sigma,
+        return moment_matching(data, ref_mu, ref_s2,
                                ref_params['glob_mu'],
-                               ref_params['glob_sigma'])
+                               ref_params['glob_s2'])
 
     def _run(self):
-        S = Segmentation(self.data, mask=self.mask,
-                         mu=self.init_mu, sigma=self.init_sigma,
-                         ngb_size=self.ngb_size, beta=self.beta)
+        S = VEM(self.img, mask=self.mask,
+                mu=self.init_mu, s2=self.init_s2,
+                ngb_size=self.ngb_size, beta=self.beta)
         S.run(niters=self.niters)
         self.mu = S.mu
-        self.sigma = S.sigma
+        self.s2 = S.s2
         self.ppm = S.ppm
 
     def convert(self):

@@ -1,21 +1,20 @@
 # emacs: -*- mode: python; py-indent-offset: 4; indent-tabs-mode: nil -*-
 # vi: set ft=python sts=4 ts=4 sw=4 et:
 import numpy as np
-from ._segmentation import _ve_step, _interaction_energy
+from scipy.ndimage.morphology import binary_fill_holes
 
-NITERS = 10
-NGB_SIZE = 26
-BETA = 0.1
+from ._segmentation import _ve_step, _interaction_energy
+from .moment_matching import moment_matching, matching_params
 
 nonzero = lambda x: np.maximum(x, 1e-50)
 log = lambda x: np.log(nonzero(x))
 
 
-class Segmentation(object):
+class VEM(object):
 
-    def __init__(self, data, mask=None, mu=None, sigma=None,
-                 ppm=None, prior=None, U=None,
-                 ngb_size=NGB_SIZE, beta=BETA):
+    def __init__(self, img, mask=None, mu=None, s2=1e-5, prop=None,
+                 prior=None, U=None, ngb_size=6, beta=None,
+                 usecase='brainT1'):
         """
         Class for multichannel Markov random field image segmentation
         using the variational EM algorithm. For details regarding the
@@ -27,11 +26,12 @@ class Segmentation(object):
 
         Parameters
         ----------
-        data : array-like
-          Input image array
+        img : image-like
+          Input image
 
-        mask : array-like or tuple of array
-          Input mask to restrict the segmentation
+        mask : array-like or tuple of arrays
+          Input mask to restrict the segmentation. By default, the
+          mask excludes voxels with zero intensities.
 
         beta : float
           Markov regularization parameter
@@ -39,10 +39,13 @@ class Segmentation(object):
         mu : array-like
           Initial class-specific means
 
-        sigma : array-like
+        s2 : array-like
           Initial class-specific variances
+
+        prop : array-like
+          Initial class-specific proportions (uniform if None)
         """
-        data = data.squeeze()
+        data = img.get_data().squeeze()
         if not len(data.shape) in (3, 4):
             raise ValueError('Invalid input image')
         if len(data.shape) == 3:
@@ -54,43 +57,51 @@ class Segmentation(object):
 
         self.nchannels = nchannels
 
-        # Make default mask (required by MRF regularization). This wil
-        # be passed to the _ve_step C-routine, which assumes a
-        # contiguous int array and raise an error otherwise. Voxels on
-        # the image borders are further rejected to avoid segmentation
-        # faults.
+        # Make default mask that removes zero intensities and fills
+        # holes. This wil be passed to the _ve_step C-routine, which
+        # assumes a contiguous int array and raise an error
+        # otherwise. Voxels on the image borders are further rejected
+        # to avoid segmentation faults.
         if mask == None:
-            mask = np.ones(space_shape, dtype=bool)
+            mask = binary_fill_holes(data > 0)
         X, Y, Z = np.where(mask)
         XYZ = np.zeros((X.shape[0], 3), dtype='intp')
         XYZ[:, 0], XYZ[:, 1], XYZ[:, 2] = X, Y, Z
         self.XYZ = XYZ
-
         self.mask = mask
         self.data = data[mask]
         if nchannels == 1:
             self.data = np.reshape(self.data, (self.data.shape[0], 1))
 
-        # By default, the ppm is initialized as a collection of
-        # uniform distributions
-        if ppm == None:
-            nclasses = len(mu)
-            self.ppm = np.zeros(list(space_shape) + [nclasses])
-            self.ppm[mask] = 1. / nclasses
-            self.is_ppm = False
-            self.mu = np.array(mu, dtype='double').reshape(\
-                (nclasses, nchannels))
-            self.sigma = np.array(sigma, dtype='double').reshape(\
-                (nclasses, nchannels, nchannels))
-        elif mu == None:
-            nclasses = ppm.shape[-1]
-            self.ppm = np.asarray(ppm)
-            self.is_ppm = True
-            self.mu = np.zeros((nclasses, nchannels))
-            self.sigma = np.zeros((nclasses, nchannels, nchannels))
-        else:
-            raise ValueError('missing information')
+        # Initialize ppm as uniform distributions
+        try:
+            self.classes, self.matching_params = matching_params[usecase]
+            self.usecase = usecase
+            _mu, _s2 = moment_matching(self.data, *self.matching_params)
+            if mu == None:
+                mu = _mu
+            if s2 == None:
+                s2 = _s2
+        except:
+            self.usecase = 'unknown'
+            self.matching_params = None
+
+        nclasses = len(mu)
         self.nclasses = nclasses
+        self.ppm = np.zeros(list(space_shape) + [nclasses])
+        self.ppm[mask] = 1. / nclasses
+        self.mu = np.array(mu, dtype=float).reshape(\
+            (nclasses, nchannels))
+        try:
+            self.s2 = np.array(s2, dtype=float).reshape(\
+                (nclasses, nchannels, nchannels))
+        except:
+            self.s2 = s2 * np.ones((nclasses, nchannels, nchannels))
+
+        if prop == None:
+            self.prop = np.ones(nclasses)
+        else:
+            self.prop = np.asarray(prop, dtype=float)
 
         if not prior == None:
             self.prior = np.asarray(prior)[self.mask].reshape(\
@@ -108,22 +119,33 @@ class Segmentation(object):
             U = np.ones((self.nclasses, self.nclasses))
             U[_diag_indices(self.nclasses)] = 0
             self.U = U
+        if beta == None:
+            beta = 0.5
         self.beta = float(beta)
 
-    def vm_step(self, freeze=()):
+    def vm_step(self, freeze=(), update_s2=True, update_prop=False):
+
+        # don't update frozen class parameters 
         classes = range(self.nclasses)
         for i in freeze:
             classes.remove(i)
-
+        
         for i in classes:
             P = self.ppm[..., i][self.mask].ravel()
             Z = nonzero(P.sum())
             tmp = self.data.T * P.T
             mu = tmp.sum(1) / Z
             mu_ = mu.reshape((len(mu), 1))
-            sigma = np.dot(tmp, self.data) / Z - np.dot(mu_, mu_.T)
             self.mu[i] = mu
-            self.sigma[i] = sigma
+            if update_s2:
+                s2 = np.dot(tmp, self.data) / Z - np.dot(mu_, mu_.T)
+                self.s2[i] = s2
+            if update_prop:
+                self.prop[i] = Z
+        
+        if update_prop:
+            self.prop /= np.sum(self.prop)
+
 
     def log_external_field(self):
         """
@@ -136,18 +158,19 @@ class Segmentation(object):
         for i in range(self.nclasses):
             centered_data = self.data - self.mu[i]
             if self.nchannels == 1:
-                inv_sigma = 1. / nonzero(self.sigma[i])
-                norm_factor = np.sqrt(inv_sigma.squeeze())
+                inv_s2 = 1. / nonzero(self.s2[i])
+                norm_factor = np.sqrt(inv_s2.squeeze())
             else:
-                inv_sigma = np.linalg.inv(self.sigma[i])
+                inv_s2 = np.linalg.inv(self.s2[i])
                 norm_factor = 1. / np.sqrt(\
-                    nonzero(np.linalg.det(self.sigma[i])))
-            maha_dist = np.sum(centered_data * np.dot(inv_sigma,
+                    nonzero(np.linalg.det(self.s2[i])))
+            maha_dist = np.sum(centered_data * np.dot(inv_s2,
                                                       centered_data.T).T, 1)
-            lef[:, i] = -.5 * maha_dist
-            lef[:, i] += log(norm_factor)
+            lef[:, i] = -.5 * maha_dist + log(norm_factor) + log(self.prop[i])
+            #lef[:, i] += log(norm_factor)
+            #lef[:, i] += log(self.prop[i])
 
-        if not self.prior == None:
+        if self.prior != None:
             lef += log(self.prior)
 
         return lef
@@ -168,13 +191,10 @@ class Segmentation(object):
             self.ppm = _ve_step(self.ppm, nef, self.XYZ,
                                 self.U, self.ngb_size, self.beta)
 
-    def run(self, niters=NITERS, freeze=()):
-        if self.is_ppm:
-            self.vm_step(freeze=freeze)
+    def run(self, niters=1, freeze=(), update_s2=True, update_prop=False):
         for i in range(niters):
             self.ve_step()
-            self.vm_step(freeze=freeze)
-        self.is_ppm = True
+            self.vm_step(freeze=freeze, update_s2=update_s2, update_prop=update_prop)
 
     def map(self):
         """
@@ -189,7 +209,7 @@ class Segmentation(object):
         F(q, theta) = int q(x) log q(x)/p(x,y/theta) dx
 
         associated with input parameters mu,
-        sigma and beta (up to an ignored constant).
+        s2 and beta (up to an ignored constant).
         """
         if ppm == None:
             ppm = self.ppm
@@ -211,45 +231,6 @@ def _diag_indices(n, ndim=2):
     # compatibility with numpy < 1.4
     idx = np.arange(n)
     return (idx,) * ndim
-
-
-def moment_matching(dat, mu, sigma, glob_mu, glob_sigma):
-    """
-    Moment matching strategy for parameter initialization to feed a
-    segmentation algorithm.
-
-    Parameters
-    ----------
-    data: array
-      Image data.
-
-    mu : array
-      Template class-specific intensity means
-
-    sigma : array
-      Template class-specific intensity variances
-
-    glob_mu : float
-      Template global intensity mean
-
-    glob_sigma : float
-      Template global intensity variance
-
-    Returns
-    -------
-    dat_mu: array
-      Guess of class-specific intensity means
-
-    dat_sigma: array
-      Guess of class-specific intensity variances
-    """
-    dat_glob_mu = float(np.mean(dat))
-    dat_glob_sigma = float(np.var(dat))
-    a = np.sqrt(dat_glob_sigma / glob_sigma)
-    b = dat_glob_mu - a * glob_mu
-    dat_mu = a * mu + b
-    dat_sigma = (a ** 2) * sigma
-    return dat_mu, dat_sigma
 
 
 def map_from_ppm(ppm, mask=None):

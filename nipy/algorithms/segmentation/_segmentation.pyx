@@ -288,32 +288,34 @@ def quadsimplex(A, b):
     return b
 
 
-def update_cmap(CM, DATA, XYZ, MU, double s2, alpha, double beta, int ngb_size):
+def update_cmap(CM, DATA, XYZ, MU, s2, alpha, double beta, int ngb_size):
     """
     update_cmap(cm, data, XYZ, mu, s2, beta, V, ngb_size)
 
     where dimensions are:
-      cm: (dx,dy,dz,K)
+      cm: (dimx,dimy,dimz,nclasses)
       data: (N,)
       XYZ: (N,3)
-      mu: (K,)
-      s2: float
-      alpha: (K,K)
+      mu: (nclasses,)
+      s2: (nchannels,)
+      alpha: (nclasses,nclasses)
       beta: float
 
     Parameter cm is modified in place.
     """
-    cdef np.flatiter itY, itQ
-    cdef double *data, *cm, *_cm, *q
+    cdef double *data, *cm, *_cm, *q, *buf
     cdef double *A, *b, *pb, *AI, *bI, *cI, *AI_cp
-    cdef int dimx, dimy, dimz, stx, sty
-    cdef int K, Kbytes, nbmaps, axis = 1
+    cdef int N, dimx, dimy, dimz, stx, sty
+    cdef int nchannels = 1, nclasses, nclasses_bytes, nbmaps, axis = 1
     cdef int *bmaps, *I, *tmp
     cdef np.npy_intp* xyz
-    cdef double degree, two_beta = 2*beta
+    cdef double aux, degree, two_beta = 2*beta
 
     # Test input compliance and reformat if needed
     DATA = np.asarray(DATA, dtype='double', order='C')
+    N = DATA.shape[0]
+    if len(DATA.shape) > 1:
+        nchannels = DATA.shape[1]
     if not CM.ndim == 4 or not CM.flags['C_CONTIGUOUS']\
             or not CM.dtype=='double':
         raise ValueError('cm should be 4D, double and C-contiguous')
@@ -322,35 +324,36 @@ def update_cmap(CM, DATA, XYZ, MU, double s2, alpha, double beta, int ngb_size):
         raise ValueError('XYZ array should be intp C-contiguous')
 
     # Compute dimensional parameters
-    dimx, dimy, dimz, K = CM.shape
-    sty = dimz*K
+    dimx, dimy, dimz, nclasses = CM.shape
+    sty = dimz*nclasses
     stx = dimy*sty
-    Kbytes = K*sizeof(double)
+    nclasses_bytes = nclasses*sizeof(double)
 
     # Create auxiliary arrays
-    MU = np.reshape(np.asarray(MU), (K, 1))
-    PyA = (1/s2)*np.dot(MU, MU.T) + np.asarray(alpha) + 2*beta*ngb_size*np.eye(K)
+    DATA = np.reshape(DATA, (N, nchannels))
+    MU = np.reshape(np.asarray(MU), (nclasses, nchannels))
     Pyb = -MU/s2
+    PyA = np.dot(-Pyb, MU.T) + np.asarray(alpha) + 2*beta*ngb_size*np.eye(nclasses)
     A = <double*>np.PyArray_DATA(PyA)
     pb = <double*>np.PyArray_DATA(Pyb)
 
     # Generate mappings from [1,2,...,n] to {0,1} for the active set
     # quadratic programming method
-    bmaps = __generate_bmaps(K, &nbmaps)
+    bmaps = __generate_bmaps(nclasses, &nbmaps)
 
     # Allocate auxiliary arrays
-    q = <double*>calloc(K, sizeof(double))
-    b = <double*>calloc(K*K, sizeof(double))
-    I = <int*>calloc(K, sizeof(int))
-    AI = <double*>calloc(K*K, sizeof(double))
-    bI = <double*>calloc(K, sizeof(double))
-    cI = <double*>calloc(K, sizeof(double))
-    AI_cp = <double*>calloc(K*K, sizeof(double))
-    tmp = <int*>calloc(K, sizeof(int))
+    q = <double*>calloc(nclasses, sizeof(double))
+    b = <double*>calloc(nclasses*nclasses, sizeof(double))
+    I = <int*>calloc(nclasses, sizeof(int))
+    AI = <double*>calloc(nclasses*nclasses, sizeof(double))
+    bI = <double*>calloc(nclasses, sizeof(double))
+    cI = <double*>calloc(nclasses, sizeof(double))
+    AI_cp = <double*>calloc(nclasses*nclasses, sizeof(double))
+    tmp = <int*>calloc(nclasses, sizeof(int))
 
     # Loop over the image array
     itXYZ = np.PyArray_IterAllButAxis(XYZ, &axis)
-    itDATA = DATA.flat
+    itDATA = np.PyArray_IterAllButAxis(DATA, &axis)
     cm = <double*>np.PyArray_DATA(CM)
     while np.PyArray_ITER_NOTDONE(itDATA):
         
@@ -360,21 +363,26 @@ def update_cmap(CM, DATA, XYZ, MU, double s2, alpha, double beta, int ngb_size):
         # Compute local sum of concentration vectors --> q
         if beta > 0:
             __locsum(q, &degree, cm, xyz[0], xyz[1], xyz[2],
-                     dimx, dimy, dimz, K, ngb_size)
+                     dimx, dimy, dimz, nclasses, ngb_size)
 
         # Get image intensity
         data = <double*>(np.PyArray_ITER_DATA(itDATA)) 
 
         # Assemble vector b at current voxel
-        for i from 0 <= i < K:
-            b[i] = pb[i]*data[0] - two_beta*q[i]
+        buf = pb
+        for i from 0 <= i < nclasses:
+            aux = 0.0
+            for j from 0 <= j < nchannels:
+                aux += buf[0] * data[j]
+                buf += 1
+            b[i] = aux - two_beta*q[i]
 
         # Solve quadratic simplex programming --> q
-        __quadsimplex(A, b, K, q, bmaps, nbmaps, I, AI, bI, cI, AI_cp, tmp)
+        __quadsimplex(A, b, nclasses, q, bmaps, nbmaps, I, AI, bI, cI, AI_cp, tmp)
 
         # Copy result back into cm
-        _cm = cm + xyz[0]*stx + xyz[1]*sty + xyz[2]*K
-        memcpy(<void*>_cm, <void*>q, Kbytes)
+        _cm = cm + xyz[0]*stx + xyz[1]*sty + xyz[2]*nclasses
+        memcpy(<void*>_cm, <void*>q, nclasses_bytes)
 
         # Update iterators
         np.PyArray_ITER_NEXT(itDATA)

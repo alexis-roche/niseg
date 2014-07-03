@@ -310,9 +310,9 @@ def update_cmap(CM, DATA, XYZ, MU, s2, alpha, double beta, int ngb_size):
     Parameter cm is modified in place.
     """
     cdef double *data, *cm, *_cm, *q, *buf
-    cdef double *A, *b, *pb, *AI, *bI, *cI, *AI_cp
-    cdef int N, dimx, dimy, dimz, stx, sty
-    cdef int nchannels = 1, nclasses, nclasses_bytes, nbmaps, axis = 1
+    cdef double *A, *b, *precA, *precB, *AI, *bI, *cI, *AI_cp
+    cdef int N, dimx, dimy, dimz, stx, sty, i, j, k
+    cdef int nchannels = 1, nclasses, nclasses_bytes, sqr_nclasses_bytes, nbmaps, axis = 1
     cdef int *bmaps, *I, *tmp
     cdef np.npy_intp* xyz
     cdef double aux, degree, two_beta = 2*beta
@@ -335,14 +335,19 @@ def update_cmap(CM, DATA, XYZ, MU, s2, alpha, double beta, int ngb_size):
     sty = dimz*nclasses
     stx = dimy*sty
     nclasses_bytes = nclasses*sizeof(double)
+    sqr_nclasses_bytes = nclasses*nclasses*sizeof(double)
 
-    # Create auxiliary arrays
+    # Reshape arrays
     DATA = np.reshape(DATA, (N, nchannels))
     MU = np.reshape(np.asarray(MU), (nclasses, nchannels))
-    Pyb = -MU/s2
-    PyA = np.dot(-Pyb, MU.T) + np.asarray(alpha) + 2*beta*ngb_size*np.eye(nclasses)
-    A = <double*>np.PyArray_DATA(PyA)
-    pb = <double*>np.PyArray_DATA(Pyb)
+
+    # Pre-compute auxiliary arrays
+    # precA: nclasses x nclasses matrix 
+    # precB: nclasses x nchannels matrix 
+    PrecB = -MU/s2
+    PrecA = np.dot(-PrecB, MU.T) + np.asarray(alpha)
+    precA = <double*>np.PyArray_DATA(PrecA)  
+    precB = <double*>np.PyArray_DATA(PrecB)
 
     # Generate mappings from [1,2,...,n] to {0,1} for the active set
     # quadratic programming method
@@ -350,7 +355,8 @@ def update_cmap(CM, DATA, XYZ, MU, s2, alpha, double beta, int ngb_size):
 
     # Allocate auxiliary arrays
     q = <double*>calloc(nclasses, sizeof(double))
-    b = <double*>calloc(nclasses*nclasses, sizeof(double))
+    A = <double*>calloc(nclasses*nclasses, sizeof(double))
+    b = <double*>calloc(nclasses, sizeof(double))
     I = <int*>calloc(nclasses, sizeof(int))
     AI = <double*>calloc(nclasses*nclasses, sizeof(double))
     bI = <double*>calloc(nclasses, sizeof(double))
@@ -375,14 +381,20 @@ def update_cmap(CM, DATA, XYZ, MU, s2, alpha, double beta, int ngb_size):
         # Get image intensity
         data = <double*>(np.PyArray_ITER_DATA(itDATA)) 
 
-        # Assemble vector b at current voxel
-        buf = pb
+        # Assemble matrix A and vector b at current voxel
+        # A is obtained by adding 2*beta*degree to the diagonal of precA
+        # b is obtained by computing the dot product precB*Y and
+        # subtracting 2*beta times q
+        memcpy(<void*>A, <void*>precA, sqr_nclasses_bytes)
+        buf = precB
         for i from 0 <= i < nclasses:
             aux = 0.0
             for j from 0 <= j < nchannels:
                 aux += buf[0] * data[j]
                 buf += 1
             b[i] = aux - two_beta*q[i]
+            k = i * (nclasses + 1)
+            A[k] = A[k] + two_beta*degree
 
         # Solve quadratic simplex programming --> q
         __quadsimplex(A, b, nclasses, q, bmaps, nbmaps, I, AI, bI, cI, AI_cp, tmp, dgesv_ptr)
@@ -397,6 +409,7 @@ def update_cmap(CM, DATA, XYZ, MU, s2, alpha, double beta, int ngb_size):
 
     # Free auxiliary arrays
     free(q)
+    free(A)
     free(b)
     free(I)
     free(AI)

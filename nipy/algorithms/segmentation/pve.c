@@ -82,6 +82,7 @@ void __locsum(double* res,
   size_t sty = dimz*dimk;
   size_t stx = dimy*sty;
   size_t posmax = dimx*stx - dimk;
+  double total;
 
   /* Neighborhood type */
   if (ngb_size == 6)
@@ -105,13 +106,19 @@ void __locsum(double* res,
     /* Ignore neighbor if outside the grid boundaries */
     if ((pos < 0) || (pos > posmax))
       continue; 
-    count ++;
 
     /* Update sum of concentrations */
     _res = res;
     _cm = (double*)cm + pos;
-    for (k=0; k<dimk; k++, _res++, _cm++)
+    total = 0.0;
+    for (k=0; k<dimk; k++, _res++, _cm++) {
       *_res += *_cm;
+      total += *_cm;
+    }
+
+    /* Only count neighbor if total concentration is nonzero */
+    if (total > 0)
+      count ++;
   }
 
   *degree = (double)count;

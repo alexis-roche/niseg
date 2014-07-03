@@ -11,8 +11,12 @@ __version__ = '0.2'
 # Includes
 import numpy as np
 cimport numpy as np
+from scipy.linalg.lapack import flapack
 
 # Externals
+cdef extern from "Python.h":
+    void* PyCObject_AsVoidPtr(object obj)
+
 cdef extern from "mrf.h":
     void mrf_import_array()
     void ve_step(np.ndarray ppm, 
@@ -29,7 +33,7 @@ cdef extern from "mrf.h":
                               int ngb_size)
 cdef extern from "pve.h":
     void pve_import_array()
-    int __linsolve(double* A, double* b, int* tmp, int n)
+    int __linsolve(double* A, double* b, int* tmp, int n, void* dgesv_ptr)
     void __locsum(double* res, double* degree, double* pvm,
                   int x, int y, int z,
                   int dimx, int dimy, int dimz, int dimk,
@@ -38,8 +42,8 @@ cdef extern from "pve.h":
     void __quadsimplex(double* A, double* b, int n,
                        double* x, int* bmaps, int nbmaps,
                        int* I, double* AI, double* bI, double* cI,
-                       double* AI_cp, int* tmp)
-    void _quadsimplex(np.ndarray A, np.ndarray b)
+                       double* AI_cp, int* tmp, void* dgesv_ptr)
+    void _quadsimplex(np.ndarray A, np.ndarray b, void* dgesv_ptr)
 cdef extern from "stdlib.h":
     void* calloc(int nmemb, int size)
     void* free(void* ptr) 
@@ -273,18 +277,20 @@ def simplex_fitting(Y, M, Q0, C):
 
 def linsolve(A, b):
     cdef int ok, n = np.PyArray_DIM(A, 0)
+    cdef void* dgesv_ptr = PyCObject_AsVoidPtr(flapack.dgesv._cpointer)
     Ac = np.array(A, order='F')
     bc = np.array(b, order='F')
     tmp = <int*>calloc(n, sizeof(int))
     ok = __linsolve(<double*>np.PyArray_DATA(Ac),
                      <double*>np.PyArray_DATA(bc), 
-                     tmp, n)
+                     tmp, n, dgesv_ptr)
     free(tmp)
     return bc
 
 
 def quadsimplex(A, b):
-    _quadsimplex(A, b)
+    cdef void* dgesv_ptr = PyCObject_AsVoidPtr(flapack.dgesv._cpointer)
+    _quadsimplex(A, b, dgesv_ptr)
     return b
 
 
@@ -310,6 +316,7 @@ def update_cmap(CM, DATA, XYZ, MU, s2, alpha, double beta, int ngb_size):
     cdef int *bmaps, *I, *tmp
     cdef np.npy_intp* xyz
     cdef double aux, degree, two_beta = 2*beta
+    cdef void* dgesv_ptr = PyCObject_AsVoidPtr(flapack.dgesv._cpointer)
 
     # Test input compliance and reformat if needed
     DATA = np.asarray(DATA, dtype='double', order='C')
@@ -378,7 +385,7 @@ def update_cmap(CM, DATA, XYZ, MU, s2, alpha, double beta, int ngb_size):
             b[i] = aux - two_beta*q[i]
 
         # Solve quadratic simplex programming --> q
-        __quadsimplex(A, b, nclasses, q, bmaps, nbmaps, I, AI, bI, cI, AI_cp, tmp)
+        __quadsimplex(A, b, nclasses, q, bmaps, nbmaps, I, AI, bI, cI, AI_cp, tmp, dgesv_ptr)
 
         # Copy result back into cm
         _cm = cm + xyz[0]*stx + xyz[1]*sty + xyz[2]*nclasses

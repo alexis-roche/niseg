@@ -10,9 +10,7 @@
 #define TINY 1e-50
 #define ABS(a) ( (a) > 0.0 ? (a) : (-(a)) )
 
-/* Lapack routine to solve a linear system using LU decomposition */
-extern int FNAME(dgesv)(int* n, int* m, double* a, int* lda,
-			int* ipiv, double* b, int* ldb, int* info);
+
 
 /* Numpy import */
 void pve_import_array(void) { 
@@ -132,13 +130,19 @@ void __locsum(double* res,
   the result is overwritten.
 
   tmp is an auxiliary array of int with length n used by Lapack to
-  store intermediate calculations.  */
-int __linsolve(double* A, double* b, int* tmp, int n)
+  store intermediate calculations.
+
+  dgesv_ptr is a pointer to the Lapack routine `dgesv` that solves a
+  linear system using LU decomposition
+*/
+int __linsolve(double* A, double* b, int* tmp, int n, void* dgesv_ptr)
 {
   int info;
   int m = 1;
+  int (*_dgesv_ptr)(int*, int*, double*, int*, int*, double*, int*, int*);
 
-  FNAME(dgesv)(&n, &m, A, &n, tmp, b, &n, &info);
+  _dgesv_ptr = dgesv_ptr;
+  (*_dgesv_ptr)(&n, &m, A, &n, tmp, b, &n, &info);
 
   return info;
 }
@@ -199,7 +203,8 @@ void __quadsimplex(const double* A,
 		   double* bI,
 		   double* cI,
 		   double* AI_cp,
-		   int* tmp)
+		   int* tmp,
+		   void* dgesv_ptr)
 {
   double *_AI, *_bI, *_cI;
   double aux, alpha, dot_bbI, dot_cbI, dot_ccI, cost, best = HUGE_VAL;
@@ -232,7 +237,7 @@ void __quadsimplex(const double* A,
     /* Solve AI*x = bI and store the result in bI */
     memcpy((void*)AI_cp, (void*)AI, nI*nI*sizeof(double));
     memcpy((void*)cI, (void*)bI, nI*sizeof(double));
-    __linsolve(AI_cp, bI, tmp, nI);
+    __linsolve(AI_cp, bI, tmp, nI, dgesv_ptr);
 
     /* Compute the dot product bI^T AI^-1 bI */
     for (i=0, dot_bbI=0, _bI=bI, _cI=cI; i<nI; i++, _bI++, _cI++)
@@ -241,7 +246,7 @@ void __quadsimplex(const double* A,
     /* Solve AI*x = 1 and store the result in cI */
     for (i=0, _cI=cI; i<nI; i++, _cI++)
       *_cI = 1;
-    __linsolve(AI, cI, tmp, nI);
+    __linsolve(AI, cI, tmp, nI, dgesv_ptr);
 
     /* Compute the dot products: cI^T AI^-1 bI and cI^T AI^-1 cI */
     for (i=0, _bI=bI, _cI=cI, dot_cbI=0, dot_ccI=0; i<nI; i++, _bI++, _cI++) {
@@ -291,7 +296,7 @@ void __quadsimplex(const double* A,
   return;
 }
 
-void _quadsimplex(const PyArrayObject* PyA, const PyArrayObject* Pyb)
+void _quadsimplex(const PyArrayObject* PyA, const PyArrayObject* Pyb, void* dgesv_ptr)
 {
   int nbmaps, n = PyA->dimensions[0];
   int *bmaps, *I, *tmp;
@@ -312,7 +317,7 @@ void _quadsimplex(const PyArrayObject* PyA, const PyArrayObject* Pyb)
   bmaps = __generate_bmaps(n, &nbmaps);
 
   /* Solve quadratic simplex programming */
-  __quadsimplex(A, b, n, x, bmaps, nbmaps, I, AI, bI, cI, AI_cp, tmp);
+  __quadsimplex(A, b, n, x, bmaps, nbmaps, I, AI, bI, cI, AI_cp, tmp, dgesv_ptr);
   memcpy((void*)b, (void*)x, n*sizeof(double));
 
   /* Free memory */

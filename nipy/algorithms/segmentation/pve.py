@@ -10,90 +10,55 @@ from .moment_matching import moment_matching, matching_params
 from ._segmentation import update_cmap
 
 
-def hyperparameters(usecase, ngb_size):
-    """
-    Return suitable hyperparameters as a dictionary for a particular
-    combination of tissues, modality and neighborhood size. 
-    """
-    p = {}
-    if usecase == 'brainT1':
-        if ngb_size == 6:
-            p['alpha'] = np.array([10.398556972836019, 29485.917556006651, 7.030430723881528])
-            p['beta'] = 1.1851546491201328
-            p['gamma'] =  0.0048004191376676006
-    return p
+def update_parameters(data, mcmap, gamma, mmu):
+    npts = len(data)
+    ntissues = mcmap.shape[1]
+    b = np.sum(np.reshape(data, (npts, 1)) * mcmap, 0)
+    A = np.dot(mcmap.T, mcmap)
+    if gamma > 0:
+        A += gamma * npts * np.eye(ntissues)
+        b += gamma * npts * mmu
+    mu = np.asarray(np.dot(np.linalg.pinv(A), b))
+    s2 = float(np.mean((data - np.dot(mcmap, mu)) ** 2))
+    if gamma > 0:
+        s2 += float(gamma * np.sum((mu - mmu) ** 2))
+    return mu, s2
 
 
-class PartialVolumeEstimation(object):
+def update_parameters_fcmean(data, mcmap):
+    npts = len(data)
+    ntissues = mcmap.shape[1]
+    w = mcmap ** 2
+    mu = np.asarray(np.sum(w * np.reshape(data, (npts, 1)), 0)\
+                        / np.sum(w, 0))
+    tmp = data - np.reshape(mu, (ntissues, 1))
+    s2 = float(np.sum((tmp.T * mcmap) ** 2) / npts)
+    return mu, s2
 
-    def __init__(self, img, mask=None, mu=None, s2=1e-5,
-                 alpha=None, beta=None, gamma=None,
-                 ngb_size=6, usecase='brainT1'):
-        try:
-            self.tissues, self.matching_params = matching_params[usecase]
-            self.usecase = usecase
-        except:
-            self.tissues = np.arange(len(mu)).astype(str)
-            self.matching_params = None
-            self.usecase = 'unknown'
-        ntissues = len(self.tissues)
-        self.ngb_size = int(ngb_size)
-        # set hyperparameters
-        self._hyperparams = hyperparameters(self.usecase, self.ngb_size)
-        self.set_alpha(alpha)
-        self.set_beta(beta)
-        self.set_gamma(gamma)
-        # data and masking
-        self._init_data(img, mask)
-        # initialize intensity parameters
-        if self.matching_params != None:
-            _mu, _s2 = self.guess_theta()
-            if mu == None:
-                self.mu = _mu
-            else:
-                self.mu = np.asarray(mu, dtype=float).squeeze()
-            if s2 == None:
-                self.s2 = _s2
-            else:
-                self.s2 = float(s2)
-        self.mmu = np.mean(self.mu)
-        # initialize with uniform concentrations
-        self.cmap = np.zeros(list(self.shape) + [ntissues])
-        self.cmap[self.mask] = 1. / ntissues
-        # sequence of intensity parameters
-        self._mu = [self.mu]
-        self._s2 = [self.s2]
 
-    def set_alpha(self, alpha):
-        ntissues = len(self.tissues)
-        if alpha == None:
-            alpha = self.hyperparam('alpha')
-        try:
-            a = float(alpha)
-            self.alpha = np.zeros(ntissues)
-            self.alpha.fill(a)
-        except:
-            self.alpha = np.asarray(alpha)
-        if self.alpha.size == (ntissues ** 2 - ntissues) / 2:
-            self.alpha_mat = np.zeros((ntissues, ntissues))
-            self.alpha_mat[np.triu_indices(ntissues, 1)] = self.alpha
-            self.alpha_mat[np.tril_indices(ntissues, -1)] = self.alpha
+def name_tissues(mu, tissues=None):
+    ntissues = np.asarray(mu).shape[0]
+    if tissues == None:
+        if ntissues != 3:
+            tissues = ['tissue' + str(k) for k in range(ntissues)]
         else:
-            self.alpha_mat = self.alpha
-        if not self.alpha_mat.shape == (ntissues, ntissues):
-            raise ValueError('Wrong alpha matrix shape, expected (%d, %d)'\
-                                 % (ntissues, ntissues))
+            tissues = ('csf', 'gm', 'wm')
+    else:
+        if len(tissues) != ntissues:
+            raise ValueError('mu and tissues arguments should have same length')
+        tissues = [str(t) for t in tissues]
+    return tissues
 
-    def set_beta(self, beta):
-        if beta == None:
-            beta = self.hyperparam('beta')
-        self.beta = float(beta)
 
-    def set_gamma(self, gamma):
-        if gamma == None:
-            gamma = self.hyperparam('gamma')
-        self.gamma = float(gamma)
-    
+class PVE(object):
+
+    def __init__(self, img, mu, s2=1e-5, mask=None, 
+                 alpha=0, beta=0, gamma=0,
+                 ngb_size=6, tissues=None):
+        self.tissues = name_tissues(mu, tissues)
+        self._init_data(img, mask)
+        self._finit(mu, s2, alpha, beta, gamma, ngb_size)
+
     def _init_data(self, img, mask):
         # get image data
         img = as_xyz_image(img)
@@ -110,45 +75,68 @@ class PartialVolumeEstimation(object):
         self.mask = mask
         self.XYZ = XYZ
 
-    def hyperparam(self, key):
-        p = self._hyperparams[key]
-        if p == None:
-            raise NotImplementedError('Unknown hyperparameter')
-        return p
+    def _init_parameters(self, mu, s2):
+        self.mu = np.asarray(mu, dtype=float)
+        self.s2 = float(s2)
+        self.mmu = np.mean(self.mu)
 
-    def guess_theta(self):
-        mu, s2 = moment_matching(self.data, *self.matching_params)
-        return mu, s2
+    def _finit(self, mu, s2, alpha, beta, gamma, ngb_size):
+        ntissues = len(self.tissues)
+        self.ngb_size = int(ngb_size)
+        # set hyperparameters
+        self.set_alpha(alpha)
+        self.set_beta(beta)
+        self.set_gamma(gamma)
+        # initialize intensity parameters
+        self._init_parameters(mu, s2)
+        # initialize with uniform concentrations
+        self.cmap = np.zeros(list(self.shape) + [ntissues])
+        self.cmap[self.mask] = 1. / ntissues
+        # sequence of intensity parameters
+        self._mu = [self.mu]
+        self._s2 = [self.s2]
 
+    def set_alpha(self, alpha):
+        ntissues = len(self.tissues)
+        alpha_size = (ntissues ** 2 - ntissues) / 2
+        try:
+            a = float(alpha)
+            alpha = np.zeros(alpha_size)
+            alpha.fill(a)
+        except:
+            alpha = np.asarray(alpha)
+        if alpha.size == alpha_size:
+            self.alpha_mat = np.zeros((ntissues, ntissues))
+            self.alpha_mat[np.triu_indices(ntissues, 1)] = alpha
+            self.alpha_mat[np.tril_indices(ntissues, -1)] = alpha
+        else:
+            self.alpha_mat = alpha
+        if not self.alpha_mat.shape == (ntissues, ntissues):
+            raise ValueError('Wrong alpha matrix shape, expected (%d, %d)'\
+                                 % (ntissues, ntissues))
+
+    def set_beta(self, beta):
+        self.beta = float(beta)
+
+    def set_gamma(self, gamma):
+        self.gamma = float(gamma)
+        
     def masked_cmap(self):
         return self.cmap[self.mask]
 
-    def update_theta(self, fcmean=False):
+    def update_parameters(self, fcmean=False, freeze_mu=False, freeze_sigma=False):
         if fcmean:
-            self._update_theta_fcmean()
-            return
-        npts = len(self.data)
-        mcmap = self.masked_cmap()
-        b = np.sum(np.reshape(self.data, (npts, 1)) * mcmap, 0)
-        A = np.dot(mcmap.T, mcmap)
-        if self.gamma > 0:
-            A += self.gamma * npts * np.eye(len(self.tissues))
-            b += self.gamma * npts * self.mmu
-        self.mu = np.asarray(np.dot(np.linalg.pinv(A), b))
-        self.s2 = float(np.mean((self.data - np.dot(mcmap, self.mu)) ** 2))
-        if self.gamma > 0:
-            self.s2 += float(self.gamma * np.sum((self.mu - self.mmu) ** 2))
+            mu, s2 = update_parameters_fcmean(self.data, self.masked_cmap())
+        else:
+            mu, s2 = update_parameters(self.data, self.masked_cmap(),
+                                       self.gamma, self.mmu)
+        if not freeze_mu:
+            self.mu = mu
+        if not freeze_s2:
+            self.s2 = s2
         self.mmu = np.mean(self.mu)
         self._mu.append(self.mu)
         self._s2.append(self.s2)
-
-    def _update_theta_fcmean(self):
-        npts = len(self.data)
-        w = self.cmap[self.mask] ** 2
-        self.mu = np.asarray(np.sum(w * np.reshape(self.data, (npts, 1)), 0)\
-                                 / np.sum(w, 0))
-        tmp = self.data - np.reshape(self.mu, (len(self.tissues), 1))
-        self.s2 = float(np.sum((tmp.T * self.masked_cmap()) ** 2) / npts)
 
     def update(self, fcmean=False):
         """
@@ -179,53 +167,156 @@ class PartialVolumeEstimation(object):
             save_image(img, join(path, tag + '_' + self.tissues[i] +\
                                      '_' + splitext(fname)[0] + '.nii.gz'))
 
-    def _print_theta(self):
+    def _print_parameters(self):
         print('mu = %s' % self.mu)
         print('s2 = %s' % self.s2)
 
-    def run(self, niters=1, fcmean_niters=0, update_theta=True, print_theta=False):
+    def run(self, niters=1, fcmean_niters=0, freeze_mu=False, freeze_s2=False, print_parameters=False):
         niters = niters + fcmean_niters
         fcmean_count = 0
-        if print_theta:
-            self._print_theta()
+        if print_parameters:
+            self._print_parameters()
         for i in range(niters):
             fcmean = fcmean_count < fcmean_niters
             print('Iter %d/%d' % (i + 1, niters))
             self.update(fcmean=fcmean)
-            if update_theta:
-                self.update_theta(fcmean=fcmean)
+            self.update_parameters(fcmean=fcmean, freeze_mu=freeze_mu, freeze_s2=freeze_s2)
             fcmean_count += 1
-            if print_theta:
-                self._print_theta()
-
-    def check_convexity(self):
-        A = self.alpha_mat +\
-            2 * self.beta * self.ngb_size * np.eye(len(self.tissues))
-        w, _ = np.linalg.eigh(A)
-        if np.min(w) < 1e-5:
-            return False
-        return True
+            if print_parameters:
+                self._print_parameters()
 
 
 
-class FuzzyCMean(PartialVolumeEstimation):
+class FuzzyCMean(PVE):
 
-    def run(self, niters=1, update_theta=True, print_theta=False):
-        if print_theta:
-            self._print_theta()
+    def run(self, niters=1, update_parameters=True, print_parameters=False):
+        if print_parameters:
+            self._print_parameters()
         for i in range(niters):
             print('Iter %d/%d' % (i + 1, niters))
             self.update(fcmean=True)
-            if update_theta:
-                self.update_theta(fcmean=True)
-            if print_theta:
-                self._print_theta()
-
-    def check_convexity(self):
-        return True
+            if update_parameters:
+                self.update_parameters(fcmean=True)
+            if print_parameters:
+                self._print_parameters()
 
     def save(self, fname, path='.'):
         self._save(fname, path, 'fmap')
 
-    
 
+class BrainT1PVE(PVE):
+
+    def __init__(self, img, mu=None, s2=1e-5, mask=None, 
+                 alpha=None, beta=None, gamma=None,
+                 ngb_size=6):
+
+        self.tissues, p = matching_params['brainT1']
+        self._init_data(img, mask)
+        # guess initial tissue means and possibly noise variance by
+        # moment matching
+        if mu == None:
+            mu, _s2 = moment_matching(self.data, *p)
+            if s2 == None:
+                s2 = _s2
+        # guess adequate hyperparameters
+        if ngb_size == 6:
+            if alpha == None:
+                alpha = np.array([10.398556972836019, 29485.917556006651, 7.030430723881528])
+            if beta == None:
+                beta = 1.1851546491201328
+            if gamma == None:
+                gamma =  0.0048004191376676006
+        self._finit(mu, s2, alpha, beta, gamma, ngb_size)
+        
+
+
+class MultichannelPVE(PVE):
+
+    def __init__(self, imgs, mu, s2=1e-5, mask=None, 
+                 alpha=0.0, beta=0.0, gamma=0.0,
+                 ngb_size=6, tissues=None):
+        """
+        imgs: sequence of images
+        """
+        self.tissues = name_tissues(mu, tissues)
+        self._init_data(imgs, mask)
+        self._finit(mu, s2, alpha, beta, gamma, ngb_size)
+
+    def _init_data(self, imgs, mask):
+        # get image data
+        img0 = as_xyz_image(imgs[0])
+        data = img0.get_data()
+        self.affine = xyz_affine(img0)
+        self.shape = data.shape
+        # masking -- by default, mask out zero intensities in the first image
+        if mask == None:
+            mask = binary_fill_holes(data > 0)
+        X, Y, Z = np.where(mask)
+        XYZ = np.zeros((X.shape[0], len(self.tissues)), dtype='intp')
+        XYZ[:, 0], XYZ[:, 1], XYZ[:, 2] = X, Y, Z
+        self.mask = mask
+        self.XYZ = XYZ
+        # data 
+        self.nchannels = len(imgs)
+        self.data = np.zeros((X.shape[0], self.nchannels))
+        for c in range(self.nchannels):
+            self.data[:, c] = imgs[c].get_data()[mask]
+
+    def set_gamma(self, gamma):
+        self.gamma = np.array(gamma) * np.ones(self.nchannels)
+
+    def _init_parameters(self, mu, s2):
+        self.mu = np.asarray(mu, dtype=float)
+        try:
+            _s2 = float(s2)
+            self.s2 = np.zeros(self.nchannels)
+            self.s2.fill(_s2)
+        except:
+            self.s2 = np.asarray(s2)
+        self.mmu = np.mean(self.mu, 0)
+
+    def update_parameters(self, fcmean=False, freeze_mu=False, freeze_s2=False):
+        self.mu = self.mu.copy()
+        self.s2 = self.s2.copy()
+        for k in range(self.nchannels):
+            if fcmean:
+                mu_k, s2_k = update_parameters_fcmean(self.data[:, k], self.masked_cmap())
+            else:
+                mu_k, s2_k = update_parameters(self.data[:, k], self.masked_cmap(),
+                                               self.gamma[k], self.mmu[k])
+            if not freeze_mu:
+                self.mu[:, k] = mu_k
+            if not freeze_s2:
+                self.s2[k] = s2_k
+
+        self.mmu = np.mean(self.mu, 0)
+        self._mu.append(self.mu)
+        self._s2.append(self.s2)
+
+    def _update_fcmean(self):
+        npts = self.data.shape[0]
+        w = self.s2[0] / self.s2
+        d2 = 0
+        for c in range(self.nchannels):
+            tmp = np.maximum(np.abs(self.data[:, c].reshape((npts, 1)) - self.mu[:, c]), 1e-50) ** 2
+            d2 += w[c] * tmp
+        d2 = 1 / d2
+        self.cmap[self.mask] = (d2.T / d2.sum(1)).T
+
+
+
+class MultichannelFuzzyCMean(MultichannelPVE):
+
+    def run(self, niters=1, update_parameters=True, print_parameters=False):
+        if print_parameters:
+            self._print_parameters()
+        for i in range(niters):
+            print('Iter %d/%d' % (i + 1, niters))
+            self.update(fcmean=True)
+            if update_parameters:
+                self.update_parameters(fcmean=True)
+            if print_parameters:
+                self._print_parameters()
+
+    def save(self, fname, path='.'):
+        self._save(fname, path, 'fmap')

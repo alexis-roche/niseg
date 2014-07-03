@@ -294,17 +294,17 @@ def quadsimplex(A, b):
     return b
 
 
-def update_cmap(CM, DATA, XYZ, MU, s2, alpha, double beta, int ngb_size):
+def update_cmap(CM, DATA, XYZ, MU, s2, alpha_mat, double beta, int ngb_size):
     """
     update_cmap(cm, data, XYZ, mu, s2, beta, V, ngb_size)
 
     where dimensions are:
-      cm: (dimx,dimy,dimz,nclasses)
-      data: (N,)
-      XYZ: (N,3)
+      cm: (dimx, dimy, dimz, nclasses)
+      data: (N, nchannels)
+      XYZ: (N, 3)
       mu: (nclasses,)
       s2: (nchannels,)
-      alpha: (nclasses,nclasses)
+      alpha_mat: (nclasses, nclasses)
       beta: float
 
     Parameter cm is modified in place.
@@ -345,7 +345,7 @@ def update_cmap(CM, DATA, XYZ, MU, s2, alpha, double beta, int ngb_size):
     # precA: nclasses x nclasses matrix 
     # precB: nclasses x nchannels matrix 
     PrecB = -MU/s2
-    PrecA = np.dot(-PrecB, MU.T) + np.asarray(alpha)
+    PrecA = np.dot(-PrecB, MU.T) + np.asarray(alpha_mat)
     precA = <double*>np.PyArray_DATA(PrecA)  
     precB = <double*>np.PyArray_DATA(PrecB)
 

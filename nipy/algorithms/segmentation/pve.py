@@ -10,18 +10,18 @@ from .moment_matching import moment_matching, matching_params
 from ._segmentation import update_cmap
 
 
-def update_parameters(data, mcmap, gamma, mmu):
+def update_parameters(data, mcmap, stab, refmu, stab_s2=False):
     npts = len(data)
     ntissues = mcmap.shape[1]
-    b = np.sum(np.reshape(data, (npts, 1)) * mcmap, 0)
-    A = np.dot(mcmap.T, mcmap)
-    if gamma > 0:
-        A += gamma * npts * np.eye(ntissues)
-        b += gamma * npts * mmu
+    b = np.mean(np.reshape(data, (npts, 1)) * mcmap, 0)
+    A = np.dot(mcmap.T, mcmap) / npts
+    if stab > 0:
+        A += stab * np.eye(ntissues)
+        b += stab * refmu
     mu = np.asarray(np.dot(np.linalg.pinv(A), b))
     s2 = float(np.mean((data - np.dot(mcmap, mu)) ** 2))
-    if gamma > 0:
-        s2 += float(gamma * np.sum((mu - mmu) ** 2))
+    if stab_s2:
+        s2 += float(stab * np.sum((mu - refmu) ** 2))
     return mu, s2
 
 
@@ -53,11 +53,11 @@ def name_tissues(mu, tissues=None):
 class PVE(object):
 
     def __init__(self, img, mu, s2=1e-5, mask=None, 
-                 alpha=0, beta=0, gamma=0,
+                 alpha=0, beta=0, gamma=0, update_refmu=False,
                  ngb_size=6, tissues=None):
         self.tissues = name_tissues(mu, tissues)
         self._init_data(img, mask)
-        self._finit(mu, s2, alpha, beta, gamma, ngb_size)
+        self._finit(mu, s2, alpha, beta, gamma, update_refmu, ngb_size)
 
     def _init_data(self, img, mask):
         # get image data
@@ -75,18 +75,14 @@ class PVE(object):
         self.mask = mask
         self.XYZ = XYZ
 
-    def _init_parameters(self, mu, s2):
-        self.mu = np.asarray(mu, dtype=float)
-        self.s2 = float(s2)
-        self.mmu = np.mean(self.mu)
-
-    def _finit(self, mu, s2, alpha, beta, gamma, ngb_size):
+    def _finit(self, mu, s2, alpha, beta, gamma, update_refmu, ngb_size):
         ntissues = len(self.tissues)
         self.ngb_size = int(ngb_size)
         # set hyperparameters
         self.set_alpha(alpha)
         self.set_beta(beta)
         self.set_gamma(gamma)
+        self.update_refmu = bool(update_refmu)
         # initialize intensity parameters
         self._init_parameters(mu, s2)
         # initialize with uniform concentrations
@@ -95,6 +91,12 @@ class PVE(object):
         # sequence of intensity parameters
         self._mu = [self.mu]
         self._s2 = [self.s2]
+
+    def _init_parameters(self, mu, s2):
+        self.mu = np.asarray(mu, dtype=float)
+        self.s2 = float(s2)
+        self.refmu = self.mu.copy()
+        self._update_refmu()
 
     def set_alpha(self, alpha):
         ntissues = len(self.tissues)
@@ -124,17 +126,33 @@ class PVE(object):
     def masked_cmap(self):
         return self.cmap[self.mask]
 
-    def update_parameters(self, fcmean=False, freeze_mu=False, freeze_sigma=False):
+    def simulate_data(self):
+        data = np.zeros(self.shape)
+        data[self.mask] = np.dot(self.masked_cmap(), self.mu)
+        return data
+
+    def _update_refmu(self):
+        if self.update_refmu:
+            self.refmu.fill(np.mean(self.mu))
+
+    def update_parameters(self, fcmean=False, freeze_mu=False, freeze_s2=False):
         if fcmean:
-            mu, s2 = update_parameters_fcmean(self.data, self.masked_cmap())
+            mu, s2 = update_parameters_fcmean(self.data, self.masked_cmap(),
+                                              self.update_refmu)
         else:
+            if self.update_refmu:
+                stab = self.gamma
+                stab_s2 = True
+            else:
+                stab = self.gamma * self.s2 / len(self.data)
+                stab_s2 = False
             mu, s2 = update_parameters(self.data, self.masked_cmap(),
-                                       self.gamma, self.mmu)
+                                       stab, self.refmu, stab_s2)
         if not freeze_mu:
             self.mu = mu
         if not freeze_s2:
             self.s2 = s2
-        self.mmu = np.mean(self.mu)
+        self._update_refmu()
         self._mu.append(self.mu)
         self._s2.append(self.s2)
 
@@ -207,7 +225,7 @@ class FuzzyCMean(PVE):
 class BrainT1PVE(PVE):
 
     def __init__(self, img, mu=None, s2=1e-5, mask=None, 
-                 alpha=None, beta=None, gamma=None,
+                 alpha=None, beta=None, gamma=None, update_refmu=True,
                  ngb_size=6):
 
         self.tissues, p = matching_params['brainT1']
@@ -226,21 +244,21 @@ class BrainT1PVE(PVE):
                 beta = 1.1851546491201328
             if gamma == None:
                 gamma =  0.0048004191376676006
-        self._finit(mu, s2, alpha, beta, gamma, ngb_size)
+        self._finit(mu, s2, alpha, beta, gamma, update_refmu, ngb_size)
         
 
 
 class MultichannelPVE(PVE):
 
     def __init__(self, imgs, mu, s2=1e-5, mask=None, 
-                 alpha=0.0, beta=0.0, gamma=0.0,
+                 alpha=0.0, beta=0.0, gamma=0.0, update_refmu=False,
                  ngb_size=6, tissues=None):
         """
         imgs: sequence of images
         """
         self.tissues = name_tissues(mu, tissues)
         self._init_data(imgs, mask)
-        self._finit(mu, s2, alpha, beta, gamma, ngb_size)
+        self._finit(mu, s2, alpha, beta, gamma, update_refmu, ngb_size)
 
     def _init_data(self, imgs, mask):
         # get image data
@@ -256,7 +274,7 @@ class MultichannelPVE(PVE):
         XYZ[:, 0], XYZ[:, 1], XYZ[:, 2] = X, Y, Z
         self.mask = mask
         self.XYZ = XYZ
-        # data 
+        # data
         self.nchannels = len(imgs)
         self.data = np.zeros((X.shape[0], self.nchannels))
         for c in range(self.nchannels):
@@ -273,7 +291,12 @@ class MultichannelPVE(PVE):
             self.s2.fill(_s2)
         except:
             self.s2 = np.asarray(s2)
-        self.mmu = np.mean(self.mu, 0)
+        self.refmu = self.mu.copy()
+        self._update_refmu()
+
+    def _update_refmu(self):
+        if self.update_refmu:
+            self.refmu[:, :] = np.mean(self.mu, 0)
 
     def update_parameters(self, fcmean=False, freeze_mu=False, freeze_s2=False):
         self.mu = self.mu.copy()
@@ -282,14 +305,20 @@ class MultichannelPVE(PVE):
             if fcmean:
                 mu_k, s2_k = update_parameters_fcmean(self.data[:, k], self.masked_cmap())
             else:
+                if self.update_refmu:
+                    stab = self.gamma[k]
+                    stab_s2 = True
+                else:
+                    stab = self.gamma[k] * self.s2[k] / self.data.shape[0]
+                    stab_s2 = False
                 mu_k, s2_k = update_parameters(self.data[:, k], self.masked_cmap(),
-                                               self.gamma[k], self.mmu[k])
+                                               stab, self.refmu[:, k], stab_s2)
             if not freeze_mu:
                 self.mu[:, k] = mu_k
             if not freeze_s2:
                 self.s2[k] = s2_k
 
-        self.mmu = np.mean(self.mu, 0)
+        self._update_refmu()
         self._mu.append(self.mu)
         self._s2.append(self.s2)
 
@@ -302,6 +331,11 @@ class MultichannelPVE(PVE):
             d2 += w[c] * tmp
         d2 = 1 / d2
         self.cmap[self.mask] = (d2.T / d2.sum(1)).T
+
+    def simulate_data(self, k):
+        data = np.zeros(self.shape)
+        data[self.mask] = np.dot(self.masked_cmap(), self.mu[:, k])
+        return data
 
 
 

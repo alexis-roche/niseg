@@ -110,7 +110,7 @@ class PVE(object):
         if alpha.size == alpha_size:
             self.alpha_mat = np.zeros((ntissues, ntissues))
             self.alpha_mat[np.triu_indices(ntissues, 1)] = alpha
-            self.alpha_mat[np.tril_indices(ntissues, -1)] = alpha
+            self.alpha_mat += self.alpha_mat.T
         else:
             self.alpha_mat = alpha
         if not self.alpha_mat.shape == (ntissues, ntissues):

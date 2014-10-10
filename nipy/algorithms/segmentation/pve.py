@@ -70,7 +70,7 @@ class PVE(object):
             mask = binary_fill_holes(data > 0)
         self.data = data[mask]
         X, Y, Z = np.where(mask)
-        XYZ = np.zeros((X.shape[0], len(self.tissues)), dtype='intp')
+        XYZ = np.zeros((X.shape[0], 3), dtype='intp')
         XYZ[:, 0], XYZ[:, 1], XYZ[:, 2] = X, Y, Z
         self.mask = mask
         self.XYZ = XYZ
@@ -270,7 +270,7 @@ class MultichannelPVE(PVE):
         if mask == None:
             mask = binary_fill_holes(data > 0)
         X, Y, Z = np.where(mask)
-        XYZ = np.zeros((X.shape[0], len(self.tissues)), dtype='intp')
+        XYZ = np.zeros((X.shape[0], 3), dtype='intp')
         XYZ[:, 0], XYZ[:, 1], XYZ[:, 2] = X, Y, Z
         self.mask = mask
         self.XYZ = XYZ

@@ -1,9 +1,8 @@
 # -*- Mode: Python -*-  
 
 """
-Markov random field utils. 
-
-Author: Alexis Roche, 2010.
+Image hard/soft segmentation utils. 
+Author: Alexis Roche, 2010-14.
 """
 
 __version__ = '0.2'
@@ -11,7 +10,7 @@ __version__ = '0.2'
 # Includes
 import numpy as np
 cimport numpy as np
-from scipy.linalg.lapack import flapack
+from scipy.linalg._flapack import dgesv
 
 # Externals
 cdef extern from "Python.h":
@@ -110,9 +109,9 @@ cdef _simple_fitting_one_voxel(double y, double* q0, double* m, double* c,
     assuming that the positivity constraints on the elements given by
     `idx` are inactive.
     """
-    cdef np.npy_intp i, j, idx_i, K = 3
     cdef double lda, mt_qe, summ, tmp
     cdef double *buf_mat
+    cdef np.npy_intp i, j, idx_i, K = 3
 
     # Compute qe = mat * b, aux = mat * 1, and the Lagrange multiplier
     # lda that matches the unit sum constraint
@@ -175,13 +174,15 @@ cdef _simple_fitting_one_voxel(double y, double* q0, double* m, double* c,
 
 cdef simple_fitting_one_voxel(double* q, double y, double* q0, double* m, double* c,
                               inactives, solver, double* b, double* qe, double* aux):
-    cdef np.npy_intp i, j, K = 3, Kbytes = K * sizeof(double), size_idx
-    cdef np.flatiter itInactives, itSolver
-    cdef np.npy_intp* idx
-    cdef double *mat, *buf_mat
-    cdef np.PyArrayObject *idx_ptr, *mat_ptr
     cdef double tmp, best = HUGE_VAL
-
+    cdef double *mat
+    cdef double *buf_mat
+    cdef np.npy_intp i, j, K = 3, Kbytes = K * sizeof(double), size_idx
+    cdef np.npy_intp* idx
+    cdef np.PyArrayObject *idx_ptr
+    cdef np.PyArrayObject *mat_ptr
+    cdef np.flatiter itInactives, itSolver
+    
     # Compute b = y * m + c * q0
     buf_mat = c
     for i from 0 <= i < K:
@@ -226,9 +227,14 @@ def simplex_fitting(Y, M, Q0, C):
     Parameter `q0` is modified in place.
     """
     cdef np.flatiter itY, itQ0
-    cdef double *y, *q0
+    cdef double *y
+    cdef double *q0
     cdef int axis = 1
-    cdef double *m, *c, *b, *qe, *aux
+    cdef double *m
+    cdef double *c
+    cdef double *b
+    cdef double *qe
+    cdef double *aux
     cdef K = 3, Kbytes = K * sizeof(double)
 
     if not Q0.flags['C_CONTIGUOUS'] or not Q0.dtype=='double':
@@ -277,7 +283,7 @@ def simplex_fitting(Y, M, Q0, C):
 
 def linsolve(A, b):
     cdef int ok, n = np.PyArray_DIM(A, 0)
-    cdef void* dgesv_ptr = PyCObject_AsVoidPtr(flapack.dgesv._cpointer)
+    cdef void* dgesv_ptr = PyCObject_AsVoidPtr(dgesv._cpointer)
     Ac = np.array(A, order='F')
     bc = np.array(b, order='F')
     tmp = <int*>calloc(n, sizeof(int))
@@ -289,7 +295,7 @@ def linsolve(A, b):
 
 
 def quadsimplex(A, b):
-    cdef void* dgesv_ptr = PyCObject_AsVoidPtr(flapack.dgesv._cpointer)
+    cdef void* dgesv_ptr = PyCObject_AsVoidPtr(dgesv._cpointer)
     _quadsimplex(A, b, dgesv_ptr)
     return b
 
@@ -309,14 +315,27 @@ def update_cmap(CM, DATA, XYZ, MU, s2, alpha_mat, double beta, int ngb_size):
 
     Parameter cm is modified in place.
     """
-    cdef double *data, *cm, *_cm, *q, *buf
-    cdef double *A, *b, *precA, *precB, *AI, *bI, *cI, *AI_cp
+    cdef double aux, degree, two_beta = 2*beta
+    cdef double *data
+    cdef double *cm
+    cdef double *_cm
+    cdef double *q
+    cdef double *buf
+    cdef double *A
+    cdef double *b
+    cdef double *precA
+    cdef double *precB
+    cdef double *AI
+    cdef double *bI
+    cdef double *cI
+    cdef double *AI_cp
     cdef int N, dimx, dimy, dimz, stx, sty, i, j, k
     cdef int nchannels = 1, nclasses, nclasses_bytes, sqr_nclasses_bytes, nbmaps, axis = 1
-    cdef int *bmaps, *I, *tmp
+    cdef int *bmaps
+    cdef int *I
+    cdef int *tmp
     cdef np.npy_intp* xyz
-    cdef double aux, degree, two_beta = 2*beta
-    cdef void* dgesv_ptr = PyCObject_AsVoidPtr(flapack.dgesv._cpointer)
+    cdef void* dgesv_ptr = PyCObject_AsVoidPtr(dgesv._cpointer)
 
     # Test input compliance and reformat if needed
     DATA = np.asarray(DATA, dtype='double', order='C')

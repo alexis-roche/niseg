@@ -1,36 +1,17 @@
 .. -*- rest -*-
 .. vim:syntax=rest
 
-====
-NIPY
-====
+=====
+NISEG
+=====
 
-Neuroimaging tools for Python.
+Brain image segmentation package for Python.
 
-The aim of NIPY is to produce a platform-independent Python environment for the
-analysis of functional brain imaging data using an open development model.
-
-In NIPY we aim to:
-
-1. Provide an open source, mixed language scientific programming
-    environment suitable for rapid development.
-
-2. Create sofware components in this environment to make it easy
-    to develop tools for MRI, EEG, PET and other modalities.
-
-3. Create and maintain a wide base of developers to contribute to
-    this platform.
-
-4. To maintain and develop this framework as a single, easily
-    installable bundle.
-
-NIPY is the work of many people. We list the main authors in the file ``AUTHOR``
-in the NIPY distribution, and other contributions in ``THANKS``.
 
 Website
 =======
 
-Current information can always be found at the NIPY website::
+Current information can always be found at the NISEG website::
 
     http://nipy.org/nipy
 
@@ -59,7 +40,7 @@ You can find our sources and single-click downloads:
 Dependencies
 ============
 
-To run NIPY, you will need:
+To run NISEG, you will need:
 
 * python_ >= 2.5 (tested with 2.5, 2.6, 2.7, 3.2, 3.3)
 * numpy_ >= 1.2

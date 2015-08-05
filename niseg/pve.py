@@ -133,8 +133,7 @@ class PVE(object):
 
     def update_parameters(self, fcmean=False, freeze_mu=False, freeze_s2=False):
         if fcmean:
-            mu, s2 = update_parameters_fcmean(self.data, self.masked_cmap(),
-                                              self.update_refmu)
+            mu, s2 = update_parameters_fcmean(self.data, self.masked_cmap())
         else:
             if self.update_refmu:
                 stab = self.gamma

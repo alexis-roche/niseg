@@ -300,7 +300,54 @@ def quadsimplex(A, b):
     return b
 
 
-def update_cmap(CM, DATA, XYZ, MU, s2, alpha_mat, double beta, int ngb_size):
+
+
+cdef _assemble(double *A, double *b, double *data, double *NNMU, double *qsum,
+               double *alpha, double two_beta, double degree,
+               int nclasses, int nchannels):
+    """
+    All contiguous arrays are assume with sizes:
+      A: nclasses ** 2
+      b: nclasses
+      data: nchannels
+      NNMU: nclasses * nchannels
+      qsum: nclasses
+      alpha: nalpha = nclasses*(nclasses+1)/2
+
+    A is updated by adding the penalty matrix induced by alpha and diag(2*beta*degree) 
+    b is obtained by computing the dot product NNMU*Y and subtracting 2*beta times qsum
+    So we compute:
+      A = A + V_alpha + 2 * beta * I
+      b = NMU * data - 2 * beta * qsum
+    """
+    cdef int i, j, c, n_i, n_j, k_i, k_j
+    cdef double *buf
+    cdef double aux, const = two_beta * degree
+
+    buf = NNMU
+    k_i = 0  # == nclasses + (nclasses-1) + ... + (nclasses-i)
+    n_i = 0  # == nclasses * i
+    for i from 0 <= i < nclasses:
+        # Compute the i-th component of NNMU*data --> aux
+        aux = 0.0
+        for c from 0 <= c < nchannels:
+            aux += buf[0] * data[c]
+            buf += 1
+        b[i] = aux - two_beta * qsum[i]
+        A[n_i + i] += const + alpha[k_i]
+        n_j = n_i + nclasses  # == nclasses * j
+        k_j = k_i + 1
+        for j from i < j < nclasses:
+            aux = alpha[k_j]
+            A[n_i + j] += aux
+            A[n_j + i] += aux
+            n_j += nclasses
+            k_j += 1
+        n_i += nclasses
+        k_i += nclasses - i
+
+
+def update_cmap(CM, DATA, XYZ, MU, s2, ALPHA, double beta, int ngb_size):
     """
     update_cmap(cm, data, XYZ, mu, s2, beta, V, ngb_size)
 
@@ -310,13 +357,14 @@ def update_cmap(CM, DATA, XYZ, MU, s2, alpha_mat, double beta, int ngb_size):
       XYZ: (N, 3)
       mu: (nclasses,)
       s2: (nchannels,)
-      alpha_mat: (nclasses, nclasses)
+      ALPHA: (nalpha,) or (N, nalpha) with nlpha == (nclasses*(nclasses+1))/2
       beta: float
 
     Parameter cm is modified in place.
     """
     cdef double aux, degree, two_beta = 2*beta
     cdef double *data
+    cdef double *alpha
     cdef double *cm
     cdef double *_cm
     cdef double *q
@@ -336,6 +384,7 @@ def update_cmap(CM, DATA, XYZ, MU, s2, alpha_mat, double beta, int ngb_size):
     cdef int *tmp
     cdef np.npy_intp* xyz
     cdef void* dgesv_ptr = PyCObject_AsVoidPtr(dgesv._cpointer)
+    cdef int dim0_alpha, nalpha, changing_alpha
 
     # Test input compliance and reformat if needed
     DATA = np.asarray(DATA, dtype='double', order='C')
@@ -356,15 +405,30 @@ def update_cmap(CM, DATA, XYZ, MU, s2, alpha_mat, double beta, int ngb_size):
     nclasses_bytes = nclasses*sizeof(double)
     sqr_nclasses_bytes = nclasses*nclasses*sizeof(double)
 
+    # Test compliance of input alpha array
+    ALPHA = np.asarray(ALPHA, dtype='double', order='C')
+    if len(ALPHA.shape) > 1:
+        changing_alpha = 1
+        dim0_alpha, nalpha = ALPHA.shape
+        if not dim0_alpha == N:
+            raise ValueError('Inconsistent 1st dimension for ALPHA array')
+    else:
+        changing_alpha = 0
+        dim0_alpha = 1
+        nalpha = ALPHA.shape[0]
+    if nalpha != (nclasses * (nclasses + 1)) / 2:
+        raise ValueError('Inconsistent dimension for ALPHA array')
+
     # Reshape arrays
     DATA = np.reshape(DATA, (N, nchannels))
+    ALPHA = np.reshape(ALPHA, (dim0_alpha, nalpha))
     MU = np.reshape(np.asarray(MU), (nclasses, nchannels))
 
     # Pre-compute auxiliary arrays
     # precA: nclasses x nclasses matrix 
     # precB: nclasses x nchannels matrix 
     PrecB = -MU/s2
-    PrecA = np.dot(-PrecB, MU.T) + np.asarray(alpha_mat)
+    PrecA = np.dot(-PrecB, MU.T)
     precA = <double*>np.PyArray_DATA(PrecA)  
     precB = <double*>np.PyArray_DATA(PrecB)
 
@@ -384,8 +448,9 @@ def update_cmap(CM, DATA, XYZ, MU, s2, alpha_mat, double beta, int ngb_size):
     tmp = <int*>calloc(nclasses, sizeof(int))
 
     # Loop over the image array
-    itXYZ = np.PyArray_IterAllButAxis(XYZ, &axis)
     itDATA = np.PyArray_IterAllButAxis(DATA, &axis)
+    itXYZ = np.PyArray_IterAllButAxis(XYZ, &axis)
+    itALPHA = np.PyArray_IterAllButAxis(ALPHA, &axis)
     cm = <double*>np.PyArray_DATA(CM)
     while np.PyArray_ITER_NOTDONE(itDATA):
         
@@ -400,20 +465,12 @@ def update_cmap(CM, DATA, XYZ, MU, s2, alpha_mat, double beta, int ngb_size):
         # Get image intensity
         data = <double*>(np.PyArray_ITER_DATA(itDATA)) 
 
+        # Get alpha vector at this voxel
+        alpha = <double*>(np.PyArray_ITER_DATA(itALPHA))
+
         # Assemble matrix A and vector b at current voxel
-        # A is obtained by adding 2*beta*degree to the diagonal of precA
-        # b is obtained by computing the dot product precB*Y and
-        # subtracting 2*beta times q
         memcpy(<void*>A, <void*>precA, sqr_nclasses_bytes)
-        buf = precB
-        for i from 0 <= i < nclasses:
-            aux = 0.0
-            for j from 0 <= j < nchannels:
-                aux += buf[0] * data[j]
-                buf += 1
-            b[i] = aux - two_beta*q[i]
-            k = i * (nclasses + 1)
-            A[k] = A[k] + two_beta*degree
+        _assemble(A, b, data, precB, q, alpha, two_beta, degree, nclasses, nchannels)
 
         # Solve quadratic simplex programming --> q
         __quadsimplex(A, b, nclasses, q, bmaps, nbmaps, I, AI, bI, cI, AI_cp, tmp, dgesv_ptr)
@@ -425,6 +482,8 @@ def update_cmap(CM, DATA, XYZ, MU, s2, alpha_mat, double beta, int ngb_size):
         # Update iterators
         np.PyArray_ITER_NEXT(itDATA)
         np.PyArray_ITER_NEXT(itXYZ)
+        if changing_alpha:
+             np.PyArray_ITER_NEXT(itALPHA)
 
     # Free auxiliary arrays
     free(q)
@@ -450,3 +509,4 @@ def generate_bmaps(int n):
         data[i] = bmaps[i]
     free(bmaps)
     return ret
+

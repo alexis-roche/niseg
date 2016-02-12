@@ -52,6 +52,10 @@ class PVE(object):
     def __init__(self, img, mu, s2=1e-5, mask=None, 
                  alpha=0, beta=0, gamma=0, update_refmu=False,
                  ngb_size=6, tissues=None):
+
+        """
+        alpha : a sequence with size K(K+1)/2 of real numbers or images.
+        """
         self.tissues = name_tissues(mu, tissues)
         self._init_data(img, mask)
         self._finit(mu, s2, alpha, beta, gamma, update_refmu, ngb_size)
@@ -95,23 +99,29 @@ class PVE(object):
         self._update_refmu()
 
     def set_alpha(self, alpha):
+        """
+        Either alpha is a float, a sequence of floats, or a sequence of float/images
+        """
         ntissues = len(self.tissues)
-        alpha_size = (ntissues ** 2 - ntissues) / 2
+        alpha_size = (ntissues * (ntissues + 1)) / 2
         try:
             a = float(alpha)
-            alpha = np.zeros(alpha_size)
-            alpha.fill(a)
+            self.alpha = np.zeros(alpha_size)
+            self.alpha.fill(a)
+            return
         except:
-            alpha = np.asarray(alpha)
-        if alpha.size == alpha_size:
-            self.alpha_mat = np.zeros((ntissues, ntissues))
-            self.alpha_mat[np.triu_indices(ntissues, 1)] = alpha
-            self.alpha_mat += self.alpha_mat.T
-        else:
-            self.alpha_mat = alpha
-        if not self.alpha_mat.shape == (ntissues, ntissues):
-            raise ValueError('Wrong alpha matrix shape, expected (%d, %d)'\
-                                 % (ntissues, ntissues))
+            if len(alpha) != alpha_size:
+                raise ValueError('Wrong length for alpha parameter, should be %d' % alpha_size)
+        try:
+            self.alpha = np.array(alpha, dtype=float)
+            return
+        except:
+            self.alpha = np.zeros((self.data.shape[0], alpha_size))
+        for i in range(alpha_size):
+            try:
+                self.alpha[:, i] = alpha[i]
+            except:
+                self.alpha[:, i] = alpha[i].get_data()[self.mask]
 
     def set_beta(self, beta):
         self.beta = float(beta)
@@ -159,7 +169,7 @@ class PVE(object):
             self._update_fcmean()
             return
         update_cmap(self.cmap, self.data, self.XYZ, self.mu, self.s2,
-                    self.alpha_mat, self.beta, self.ngb_size)
+                    self.alpha, self.beta, self.ngb_size)
 
     def _update_fcmean(self):
         npts = len(self.data)
@@ -234,7 +244,7 @@ class BrainT1PVE(PVE):
         # guess adequate hyperparameters
         if ngb_size == 6:
             if alpha == None:
-                alpha = np.array([10.398556972836019, 29485.917556006651, 7.030430723881528])
+                alpha = np.array([0, 10.398556972836019, 29485.917556006651, 0, 7.030430723881528, 0])
             if beta == None:
                 beta = 1.1851546491201328
             if gamma == None:
@@ -349,3 +359,5 @@ class MultichannelFuzzyCMean(MultichannelPVE):
 
     def save(self, fname, path='.'):
         self._save(fname, path, 'fmap')
+
+
